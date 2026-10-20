@@ -35,7 +35,7 @@ jobs:
 
       - name: Configure
         run: |
-          make O=out ARCH=$ARCH CC=clang LD=ld.lld \
+          make O=out ARCH=$ARCH CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- $DEFCONFIG
           scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
@@ -45,7 +45,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          make -j$(nproc) O=out ARCH=$ARCH CC=clang LD=ld.lld \
+          make -j$(nproc) O=out ARCH=$ARCH CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- olddefconfig Image.gz-dtb 2>&1 | tee build.log
 
