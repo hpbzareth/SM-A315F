@@ -1,0 +1,60 @@
+name: Build SM-A315F kernel
+
+on:
+  workflow_dispatch:
+
+env:
+  DEFCONFIG: a31_defconfig
+  ARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm bc bison flex libssl-dev \
+            libelf-dev cpio zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Setup KernelSU-Next (legacy)
+        run: |
+          rm -rf KernelSU-Next drivers/kernelsu
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          ls -la drivers | grep -i kernelsu || true
+
+      - name: Configure
+        run: |
+          make O=out ARCH=$ARCH CC=clang LD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- $DEFCONFIG
+          scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
+          scripts/config --file out/.config -e SECURITY_SELINUX_DEVELOP -d SECURITY_SELINUX_ALWAYS_ENFORCE
+          for c in UH RKP DEFEX; do scripts/config --file out/.config -d $c || true; done
+
+      - name: Build
+        shell: bash
+        run: |
+          make -j$(nproc) O=out ARCH=$ARCH CC=clang LD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- olddefconfig Image.gz-dtb 2>&1 | tee build.log
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: A315F-kernel
+          path: |
+            out/arch/arm64/boot/Image*
+            out/.config
+            build.log
