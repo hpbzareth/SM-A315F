@@ -163,7 +163,7 @@ __attribute__((weak)) int susfs_get_enabled_features(char __user *buf, size_t si
 #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
 void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
 {
-	try_umount(mnt, flags);
+	try_umount(mnt, check_mnt, flags, uid);
 }
 #endif
 """
