@@ -1,179 +1,322 @@
 import os
 import sys
-import shutil
 
 def log(msg):
     print(f"[+] {msg}", flush=True)
 
-# 1. Ensure uapi headers are present in drivers/kernelsu/include/uapi
-uapi_dest = 'drivers/kernelsu/include/uapi'
-uapi_src = '/tmp/KernelSU-Next/uapi'
-if os.path.exists('/tmp/KernelSU-Next/uapi'):
-    if os.path.exists(uapi_dest):
-        if not os.path.isdir(uapi_dest) or os.path.islink(uapi_dest):
-            os.remove(uapi_dest)
-            shutil.copytree(uapi_src, uapi_dest)
-            log('Replaced uapi symlink with real uapi header directory')
-    else:
-        shutil.copytree(uapi_src, uapi_dest)
-        log('Copied uapi header directory to drivers/kernelsu/include/uapi')
+# 1. Patch drivers/kernelsu/pkg_observer.c for Linux 4.14 fsnotify API
+pkg_path = 'drivers/kernelsu/pkg_observer.c'
+if os.path.exists(pkg_path):
+    with open(pkg_path, 'r', encoding='utf-8') as f:
+        code = f.read()
 
-# 2. Versioning & Tag Override (33355 & v3.4.2)
-override_ver = os.environ.get('KSU_OVERRIDE_VERSION', '33355')
-override_tag = os.environ.get('KSU_OVERRIDE_VERSION_TAG', 'v3.4.2')
+    target = """static const struct fsnotify_ops ksu_ops = {
+	.handle_inode_event = ksu_handle_inode_event,
+};
 
-for kh_path in ['drivers/kernelsu/include/ksu.h', 'drivers/kernelsu/ksu.h']:
-    if os.path.exists(kh_path):
-        with open(kh_path, 'r', encoding='utf-8') as f:
-            kh = f.read()
-        target_macro = '#define KERNEL_SU_VERSION KSU_VERSION\n#define KERNEL_SU_VERSION_TAG KSU_VERSION_TAG'
-        replacement_macro = f'#undef KERNEL_SU_VERSION\n#define KERNEL_SU_VERSION {override_ver}\n#undef KERNEL_SU_VERSION_TAG\n#define KERNEL_SU_VERSION_TAG "{override_tag}"'
-        if target_macro in kh:
-            kh = kh.replace(target_macro, replacement_macro, 1)
-            with open(kh_path, 'w', encoding='utf-8') as f:
-                f.write(kh)
-            log(f'Patched {kh_path} with Version: {override_ver}, Tag: {override_tag}')
-        elif '#define KERNEL_SU_VERSION ' in kh:
-            log(f'{kh_path} already configured for versioning')
-
-# Also override in Kbuild if present
-kbuild_path = 'drivers/kernelsu/Kbuild'
-if os.path.exists(kbuild_path):
-    with open(kbuild_path, 'r', encoding='utf-8') as f:
-        kb = f.read()
-    if 'KSU_VERSION_FALLBACK := 1' in kb:
-        kb = kb.replace('KSU_VERSION_FALLBACK := 1', f'KSU_VERSION_FALLBACK := {override_ver}')
-    if 'KSU_VERSION_TAG_FALLBACK := v0.0.1' in kb:
-        kb = kb.replace('KSU_VERSION_TAG_FALLBACK := v0.0.1', f'KSU_VERSION_TAG_FALLBACK := {override_tag}')
-    with open(kbuild_path, 'w', encoding='utf-8') as f:
-        f.write(kb)
-    log(f'Patched drivers/kernelsu/Kbuild fallback version to {override_ver} ({override_tag})')
-
-# 3. Patch drivers/kernelsu/feature/kernel_umount.c for SuSFS compatibility glue
-umount_c = 'drivers/kernelsu/feature/kernel_umount.c'
-if os.path.exists(umount_c):
-    with open(umount_c, 'r', encoding='utf-8') as f:
-        ucode = f.read()
-
-    if 'static void try_umount(const char *mnt, int flags)' in ucode:
-        ucode = ucode.replace('static void try_umount(const char *mnt, int flags)', 'void try_umount(const char *mnt, int flags)')
-
-    if 'susfs_is_current_ksu_domain' not in ucode:
-        glue = """
-/* SuSFS Compatibility Glue */
-bool susfs_is_current_ksu_domain(void)
+static int add_mark_on_inode(struct inode *inode, u32 mask,
+			     struct fsnotify_mark **out)
 {
-	return is_ksu_domain();
+	struct fsnotify_mark *m;
+
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+
+	fsnotify_init_mark(m, g);
+	m->mask = mask;
+
+	if (fsnotify_add_inode_mark(m, inode, 0)) {
+		fsnotify_put_mark(m);
+		return -EINVAL;
+	}
+	*out = m;
+	return 0;
+}"""
+
+    compat_code = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static int ksu_handle_event(struct fsnotify_group *group,
+			    struct inode *to_tell,
+			    struct fsnotify_mark *inode_mark,
+			    struct fsnotify_mark *vfsmount_mark,
+			    u32 mask, const void *data, int data_type,
+			    const unsigned char *file_name, u32 cookie,
+			    struct fsnotify_iter_info *iter_info)
+{
+	if (!file_name)
+		return 0;
+	if (mask & FS_ISDIR)
+		return 0;
+	if (!strcmp((const char *)file_name, "packages.list")) {
+		pr_info("packages.list detected: %d\n", mask);
+		track_throne();
+	}
+	return 0;
 }
 
+static const struct fsnotify_ops ksu_ops = {
+	.handle_event = ksu_handle_event,
+};
+
+static int add_mark_on_inode(struct inode *inode, u32 mask,
+			     struct fsnotify_mark **out)
+{
+	struct fsnotify_mark *m;
+
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+
+	fsnotify_init_mark(m, g);
+	m->mask = mask;
+
+	if (fsnotify_add_mark(m, inode, NULL, 0)) {
+		fsnotify_put_mark(m);
+		return -EINVAL;
+	}
+	*out = m;
+	return 0;
+}
+#else
+static const struct fsnotify_ops ksu_ops = {
+	.handle_inode_event = ksu_handle_inode_event,
+};
+
+static int add_mark_on_inode(struct inode *inode, u32 mask,
+			     struct fsnotify_mark **out)
+{
+	struct fsnotify_mark *m;
+
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+
+	fsnotify_init_mark(m, g);
+	m->mask = mask;
+
+	if (fsnotify_add_inode_mark(m, inode, 0)) {
+		fsnotify_put_mark(m);
+		return -EINVAL;
+	}
+	*out = m;
+	return 0;
+}
+#endif"""
+
+    if target in code:
+        code = code.replace(target, compat_code)
+        with open(pkg_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+        log('pkg_observer.c successfully patched for Linux 4.14')
+    else:
+        log('Note: Target block not found or already patched in pkg_observer.c')
+
+# 2. Patch drivers/kernelsu/core_hook.c for SuSFS 4.14 compatibility and ksu_try_umount
+hook_path = 'drivers/kernelsu/core_hook.c'
+if os.path.exists(hook_path):
+    with open(hook_path, 'r', encoding='utf-8') as f:
+        hook_code = f.read()
+
+    target_hook = '#include <linux/susfs.h>'
+    stubs = """#include <linux/susfs.h>
+
+struct st_susfs_sus_map;
+
+#ifndef CMD_SUSFS_ADD_SUS_PATH_LOOP
+#define CMD_SUSFS_ADD_SUS_PATH_LOOP 0x55553
+static inline int susfs_add_sus_path_loop(void *arg) { return -EOPNOTSUPP; }
+#endif
+#ifndef CMD_SUSFS_SET_ANDROID_DATA_ROOT_PATH
+#define CMD_SUSFS_SET_ANDROID_DATA_ROOT_PATH 0x55551
+#define CMD_SUSFS_SET_SDCARD_ROOT_PATH 0x55552
+static inline int susfs_set_i_state_on_external_dir(void *arg, int cmd) { return -EOPNOTSUPP; }
+#endif
+#ifndef CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS
+#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS 0x55561
+#endif
+#ifndef CMD_SUSFS_UMOUNT_FOR_ZYGOTE_ISO_SERVICE
+#define CMD_SUSFS_UMOUNT_FOR_ZYGOTE_ISO_SERVICE 0x55562
+#endif
+#ifndef CMD_SUSFS_ADD_SUS_MAP
+#define CMD_SUSFS_ADD_SUS_MAP 0x60020
+static inline int susfs_add_sus_map(void *arg) { return -EOPNOTSUPP; }
+#endif
+#ifndef CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING
+#define CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING 0x60010
+static inline void susfs_set_avc_log_spoofing(bool val) {}
+#endif
+
+static inline bool susfs_is_current_proc_umounted(void) { return false; }
+static inline void susfs_set_current_proc_umounted(void) {}
+__attribute__((weak)) bool susfs_hide_sus_mnts_for_all_procs = false;
+__attribute__((weak)) void susfs_reorder_mnt_id(void) {}
+__attribute__((weak)) void susfs_run_sus_path_loop(uid_t uid) {}
+__attribute__((weak)) int susfs_get_enabled_features(char __user *buf, size_t size) { return 0; }"""
+
+    if target_hook in hook_code and 'susfs_reorder_mnt_id(void) {}' not in hook_code:
+        hook_code = hook_code.replace(target_hook, stubs, 1)
+
+    # Add ksu_try_umount bridge for susfs.c
+    if 'void ksu_try_umount' not in hook_code:
+        ksu_try_umount_impl = """
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
 void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
 {
 	try_umount(mnt, flags);
 }
-"""
-        ucode += glue
-        with open(umount_c, 'w', encoding='utf-8') as f:
-            f.write(ucode)
-        log('Patched drivers/kernelsu/feature/kernel_umount.c with SuSFS glue')
-    else:
-        log('SuSFS glue already present in kernel_umount.c')
-
-# 4. Patch throne_tracker.c for relaxed magic check (Android 16 / OneUI 8 subdirectories)
-for tt_path in ['drivers/kernelsu/manager/throne_tracker.c', 'drivers/kernelsu/throne_tracker.c']:
-    if os.path.exists(tt_path):
-        with open(tt_path, 'r', encoding='utf-8') as f:
-            tt_code = f.read()
-
-        magic_check = """if (S_MAGIC_COMPAT(file) != data_app_magic) {
-					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\\n", __func__, pos->dirpath, 
-						S_MAGIC_COMPAT(file), data_app_magic);
-					filp_close(file, NULL);
-					goto skip_iterate;
-				}"""
-
-        magic_relaxed = """/* Relaxed magic check for Android 16 / OneUI 8 subdirectories */
-				if (false && S_MAGIC_COMPAT(file) != data_app_magic) {
-					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\\n", __func__, pos->dirpath, 
-						S_MAGIC_COMPAT(file), data_app_magic);
-					filp_close(file, NULL);
-					goto skip_iterate;
-				}"""
-
-        if magic_check in tt_code:
-            tt_code = tt_code.replace(magic_check, magic_relaxed, 1)
-            with open(tt_path, 'w', encoding='utf-8') as f:
-                f.write(tt_code)
-            log(f'Relaxed filesystem magic check in {tt_path} for Android 16 / OneUI 8')
-
-# 5. Ensure kernel/reboot.c contains ksu_handle_sys_reboot hook
-reboot_path = 'kernel/reboot.c'
-if os.path.exists(reboot_path):
-    with open(reboot_path, 'r', encoding='utf-8') as f:
-        reboot_code = f.read()
-    if 'ksu_handle_sys_reboot' not in reboot_code:
-        target = '/* We only trust the superuser with rebooting the system. */'
-        hook_code = """#ifdef CONFIG_KSU
-	extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
-	if (ksu_handle_sys_reboot(magic1, magic2, cmd, &arg))
-		return 0;
 #endif
-
-	/* We only trust the superuser with rebooting the system. */"""
-        if target in reboot_code:
-            reboot_code = reboot_code.replace(target, hook_code, 1)
-            with open(reboot_path, 'w', encoding='utf-8') as f:
-                f.write(reboot_code)
-            log('Added ksu_handle_sys_reboot hook to kernel/reboot.c')
-    else:
-        log('kernel/reboot.c already verified to have ksu_handle_sys_reboot hook')
-
-# 6. Ensure fs/namespace.c contains can_umount and path_umount
-ns_path = 'fs/namespace.c'
-if os.path.exists(ns_path):
-    with open(ns_path, 'r', encoding='utf-8') as f:
-        ns_code = f.read()
-    if 'int path_umount(struct path *path, int flags)' not in ns_code:
-        target_ns = 'static bool is_mnt_ns_file(struct dentry *dentry)'
-        ns_impl = """static int can_umount(const struct path *path, int flags)
-{
-	struct mount *mnt = real_mount(path->mnt);
-
-	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
-		return -EINVAL;
-	if (!may_mount())
-		return -EPERM;
-	if (path->dentry != path->mnt->mnt_root)
-		return -EINVAL;
-	if (!check_mnt(mnt))
-		return -EINVAL;
-	if (mnt->mnt.mnt_flags & MNT_LOCKED)
-		return -EINVAL;
-	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
-	return 0;
-}
-
-int path_umount(struct path *path, int flags)
-{
-	struct mount *mnt = real_mount(path->mnt);
-	int ret;
-
-	ret = can_umount(path, flags);
-	if (!ret)
-		ret = do_umount(mnt, flags);
-	dput(path->dentry);
-	mntput_no_expire(mnt);
-	return ret;
-}
-EXPORT_SYMBOL(path_umount);
-
 """
-        if target_ns in ns_code:
-            ns_code = ns_code.replace(target_ns, ns_impl + target_ns, 1)
-            with open(ns_path, 'w', encoding='utf-8') as f:
-                f.write(ns_code)
-            log('Added can_umount and path_umount to fs/namespace.c')
-    else:
-        log('fs/namespace.c already contains path_umount')
+        hook_code += ksu_try_umount_impl
+        log('Added ksu_try_umount implementation to drivers/kernelsu/core_hook.c')
 
-log('KernelSU-Next legacy patching completed successfully!')
+    with open(hook_path, 'w', encoding='utf-8') as f:
+        f.write(hook_code)
+    log('core_hook.c successfully patched')
+
+# 3. Patch fs/notify/fdinfo.c to resolve label syntax issue
+fdinfo_path = 'fs/notify/fdinfo.c'
+if os.path.exists(fdinfo_path):
+    with open(fdinfo_path, 'r', encoding='utf-8') as f:
+        fdinfo_code = f.read()
+
+    target_label = """#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT)
+bypass_orig_flow:
+	show_fdinfo(m, f, inotify_fdinfo);
+	return 0;
+#else"""
+
+    fixed_label = """#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT)
+bypass_orig_flow:
+	;
+	show_fdinfo(m, f, inotify_fdinfo);
+	return 0;
+#else"""
+
+    if target_label in fdinfo_code:
+        fdinfo_code = fdinfo_code.replace(target_label, fixed_label)
+        with open(fdinfo_path, 'w', encoding='utf-8') as f:
+            f.write(fdinfo_code)
+        log('fs/notify/fdinfo.c label syntax fixed')
+
+# 4. Patch drivers/kernelsu/core_hook.c for on-demand throne tracking
+if os.path.exists('drivers/kernelsu/core_hook.c'):
+    with open('drivers/kernelsu/core_hook.c', 'r', encoding='utf-8') as f:
+        ch_code = f.read()
+
+    target_throne = "uid_t current_uid_val = current_uid().val;\n\tuid_t manager_uid = ksu_get_manager_uid();"
+    replacement_throne = """if (!ksu_is_manager_uid_valid()) {
+		track_throne();
+	}
+	uid_t current_uid_val = current_uid().val;
+	uid_t manager_uid = ksu_get_manager_uid();"""
+
+    if target_throne in ch_code:
+        ch_code = ch_code.replace(target_throne, replacement_throne, 1)
+        with open('drivers/kernelsu/core_hook.c', 'w', encoding='utf-8') as f:
+            f.write(ch_code)
+        log('Injected on-demand throne tracking into drivers/kernelsu/core_hook.c')
+
+# 5. Patch drivers/kernelsu/throne_tracker.c for Android 16 / OneUI 8 filesystem compatibility
+if os.path.exists('drivers/kernelsu/throne_tracker.c'):
+    with open('drivers/kernelsu/throne_tracker.c', 'r', encoding='utf-8') as f:
+        tt_code = f.read()
+
+    magic_check = """if (S_MAGIC_COMPAT(file) != data_app_magic) {
+					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath, 
+						S_MAGIC_COMPAT(file), data_app_magic);
+					filp_close(file, NULL);
+					goto skip_iterate;
+				}"""
+
+    magic_relaxed = """/* Relaxed magic check for Android 16 / OneUI 8 subdirectories */
+				if (false && S_MAGIC_COMPAT(file) != data_app_magic) {
+					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath, 
+						S_MAGIC_COMPAT(file), data_app_magic);
+					filp_close(file, NULL);
+					goto skip_iterate;
+				}"""
+
+    if magic_check in tt_code:
+        tt_code = tt_code.replace(magic_check, magic_relaxed, 1)
+        with open('drivers/kernelsu/throne_tracker.c', 'w', encoding='utf-8') as f:
+            f.write(tt_code)
+        log('Relaxed filesystem magic check in drivers/kernelsu/throne_tracker.c for Android 16')
+
+# 6. Ensure KSU_KPROBES_HOOK stays default n (Manual hook mode)
+kconfig_path = 'drivers/kernelsu/Kconfig'
+if os.path.exists(kconfig_path):
+    with open(kconfig_path, 'r', encoding='utf-8') as f:
+        kc = f.read()
+    if 'default y' in kc and 'config KSU_KPROBES_HOOK' in kc:
+        kc = kc.replace('default y', 'default n', 1)
+        with open(kconfig_path, 'w', encoding='utf-8') as f:
+            f.write(kc)
+        log('Ensured KSU_KPROBES_HOOK default n in drivers/kernelsu/Kconfig')
+
+# 7. Patch drivers/kernelsu/ksud.c for robust atrace.rc matching
+ksud_path = 'drivers/kernelsu/ksud.c'
+if os.path.exists(ksud_path):
+    with open(ksud_path, 'r', encoding='utf-8') as f:
+        ksud_c = f.read()
+    target_atrace = 'if (strcmp(dpath, "/system/etc/init/atrace.rc")) {'
+    replace_atrace = 'if (strcmp(dpath, "/system/etc/init/atrace.rc") && !strstr(dpath, "etc/init/atrace.rc")) {'
+    if target_atrace in ksud_c:
+        ksud_c = ksud_c.replace(target_atrace, replace_atrace, 1)
+        with open(ksud_path, 'w', encoding='utf-8') as f:
+            f.write(ksud_c)
+        log('Patched atrace.rc matching in drivers/kernelsu/ksud.c for Samsung Stock ROM')
+
+# 8. Patch drivers/kernelsu/ksu.c (Ensure ksu_sucompat_init runs for manual hook mode)
+ksu_c_path = 'drivers/kernelsu/ksu.c'
+if os.path.exists(ksu_c_path):
+    with open(ksu_c_path, 'r', encoding='utf-8') as f:
+        ksu_c = f.read()
+    t_init = """#ifdef CONFIG_KSU_KPROBES_HOOK
+	ksu_sucompat_init();
+	ksu_ksud_init();"""
+    r_init = """	ksu_sucompat_init();
+#ifdef CONFIG_KSU_KPROBES_HOOK
+	ksu_ksud_init();"""
+    if t_init in ksu_c:
+        ksu_c = ksu_c.replace(t_init, r_init, 1)
+
+    t_exit = """#ifdef CONFIG_KSU_KPROBES_HOOK
+	ksu_ksud_exit();
+	ksu_sucompat_exit();"""
+    r_exit = """	ksu_sucompat_exit();
+#ifdef CONFIG_KSU_KPROBES_HOOK
+	ksu_ksud_exit();"""
+    if t_exit in ksu_c:
+        ksu_c = ksu_c.replace(t_exit, r_exit, 1)
+
+    with open(ksu_c_path, 'w', encoding='utf-8') as f:
+        f.write(ksu_c)
+    log('Patched drivers/kernelsu/ksu.c to initialize sucompat for manual hook mode')
+
+# 9. Patch drivers/kernelsu/Makefile and ksu.h for KernelSU-Next v1.1.1 versioning & tag
+override_ver = os.environ.get('KSU_OVERRIDE_VERSION', '12851')
+override_tag = os.environ.get('KSU_OVERRIDE_VERSION_TAG', 'v1.1.1')
+
+ksu_h_path = 'drivers/kernelsu/ksu.h'
+if os.path.exists(ksu_h_path):
+    with open(ksu_h_path, 'r', encoding='utf-8') as f:
+        kh = f.read()
+    target_macro = '#define KERNEL_SU_VERSION KSU_VERSION\n#define KERNEL_SU_VERSION_TAG KSU_VERSION_TAG'
+    replacement_macro = f'#undef KERNEL_SU_VERSION\n#define KERNEL_SU_VERSION {override_ver}\n#undef KERNEL_SU_VERSION_TAG\n#define KERNEL_SU_VERSION_TAG "{override_tag}"'
+    if target_macro in kh:
+        kh = kh.replace(target_macro, replacement_macro, 1)
+        with open(ksu_h_path, 'w', encoding='utf-8') as f:
+            f.write(kh)
+        log(f'Patched drivers/kernelsu/ksu.h with Version: {override_ver}, Tag: {override_tag}')
+
+mk_path = 'drivers/kernelsu/Makefile'
+if os.path.exists(mk_path):
+    with open(mk_path, 'r', encoding='utf-8') as f:
+        mk_code = f.read()
+    mk_code = mk_code.replace('"v0.0.0"', f'"{override_tag}"')
+    mk_code = mk_code.replace('"$(KSU_VERSION_TAG)"', f'"{override_tag}"')
+    mk_code = mk_code.replace('11998', override_ver)
+    mk_code = mk_code.replace('$(KSU_VERSION)', override_ver)
+    with open(mk_path, 'w', encoding='utf-8') as f:
+        f.write(mk_code)
+    log(f'Patched drivers/kernelsu/Makefile with Version: {override_ver}, Tag: {override_tag}')
