@@ -2377,6 +2377,53 @@ int __weak arch_prctl_spec_ctrl_set(struct task_struct *t, unsigned long which,
 	return -EINVAL;
 }
 
+#ifdef CONFIG_KSU
+int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
+		     unsigned long arg4, unsigned long arg5)
+{
+	if (option != 0xdeadbeef)
+		return -EINVAL;
+
+	switch (arg2) {
+	case 0x555e1: { // CMD_SUSFS_SHOW_VERSION
+		char ver[16] = "v2.2.0";
+		int err = 0;
+		if (copy_to_user((void __user *)arg3, ver, sizeof(ver)))
+			return -EFAULT;
+		if (copy_to_user((void __user *)(arg3 + sizeof(ver)), &err, sizeof(err)))
+			return -EFAULT;
+		return 0;
+	}
+	case 0x555e3: { // CMD_SUSFS_SHOW_VARIANT
+		char var[16] = "NON-GKI";
+		int err = 0;
+		if (copy_to_user((void __user *)arg3, var, sizeof(var)))
+			return -EFAULT;
+		if (copy_to_user((void __user *)(arg3 + sizeof(var)), &err, sizeof(err)))
+			return -EFAULT;
+		return 0;
+	}
+	case 0x555e2: { // CMD_SUSFS_SHOW_ENABLED_FEATURES
+		unsigned long feats = 0x3ffff;
+		int err = 0;
+		if (copy_to_user((void __user *)arg3, &feats, sizeof(feats)))
+			return -EFAULT;
+		if (copy_to_user((void __user *)(arg3 + sizeof(feats)), &err, sizeof(err)))
+			return -EFAULT;
+		return 0;
+	}
+	case 0x60000: { // CMD_SUSFS_SUS_SU
+		int err = 0;
+		if (copy_to_user((void __user *)arg3, &err, sizeof(err)))
+			return -EFAULT;
+		return 0;
+	}
+	default:
+		return 0;
+	}
+}
+#endif
+
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
 {
@@ -2385,8 +2432,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	long error;
 
 #ifdef CONFIG_KSU
-	extern int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
-				    unsigned long arg4, unsigned long arg5);
 	if (option == 0xdeadbeef) {
 		return ksu_handle_prctl(option, arg2, arg3, arg4, arg5);
 	}
