@@ -34,6 +34,7 @@ static int add_mark_on_inode(struct inode *inode, u32 mask,
 	return 0;
 }"""
 
+    # Note the double-backslash \\n so in generated C code it outputs \n literally!
     compat_code = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
 static int ksu_handle_event(struct fsnotify_group *group,
 			    struct inode *to_tell,
@@ -48,7 +49,7 @@ static int ksu_handle_event(struct fsnotify_group *group,
 	if (mask & FS_ISDIR)
 		return 0;
 	if (!strcmp((const char *)file_name, "packages.list")) {
-		pr_info("packages.list detected: %d\n", mask);
+		pr_info("packages.list detected: %d\\n", mask);
 		track_throne();
 	}
 	return 0;
@@ -216,31 +217,29 @@ if os.path.exists('drivers/kernelsu/core_hook.c'):
             f.write(ch_code)
         log('Injected on-demand throne tracking into drivers/kernelsu/core_hook.c')
 
-# 5. Patch drivers/kernelsu/throne_tracker.c for Android 16 / OneUI 8 filesystem compatibility
-if os.path.exists('drivers/kernelsu/throne_tracker.c'):
-    with open('drivers/kernelsu/throne_tracker.c', 'r', encoding='utf-8') as f:
-        tt_code = f.read()
+# 5. Patch throne_tracker.c for Android 16 / OneUI 8 filesystem compatibility
+for tt_path in ['drivers/kernelsu/throne_tracker.c', 'drivers/kernelsu/manager/throne_tracker.c']:
+    if os.path.exists(tt_path):
+        with open(tt_path, 'r', encoding='utf-8') as f:
+            tt_code = f.read()
 
-    magic_check = """if (S_MAGIC_COMPAT(file) != data_app_magic) {
-					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath, 
-						S_MAGIC_COMPAT(file), data_app_magic);
-					filp_close(file, NULL);
-					goto skip_iterate;
-				}"""
-
-    magic_relaxed = """/* Relaxed magic check for Android 16 / OneUI 8 subdirectories */
-				if (false && S_MAGIC_COMPAT(file) != data_app_magic) {
-					pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath, 
-						S_MAGIC_COMPAT(file), data_app_magic);
-					filp_close(file, NULL);
-					goto skip_iterate;
-				}"""
-
-    if magic_check in tt_code:
-        tt_code = tt_code.replace(magic_check, magic_relaxed, 1)
-        with open('drivers/kernelsu/throne_tracker.c', 'w', encoding='utf-8') as f:
-            f.write(tt_code)
-        log('Relaxed filesystem magic check in drivers/kernelsu/throne_tracker.c for Android 16')
+        # Relax magic check if present
+        if 'if (file->f_inode->i_sb->s_magic != data_app_magic)' in tt_code:
+            tt_code = tt_code.replace(
+                'if (file->f_inode->i_sb->s_magic != data_app_magic)',
+                'if (false && file->f_inode->i_sb->s_magic != data_app_magic)'
+            )
+            with open(tt_path, 'w', encoding='utf-8') as f:
+                f.write(tt_code)
+            log(f'Relaxed filesystem magic check in {tt_path} for Android 16')
+        elif 'if (S_MAGIC_COMPAT(file) != data_app_magic)' in tt_code:
+            tt_code = tt_code.replace(
+                'if (S_MAGIC_COMPAT(file) != data_app_magic)',
+                'if (false && S_MAGIC_COMPAT(file) != data_app_magic)'
+            )
+            with open(tt_path, 'w', encoding='utf-8') as f:
+                f.write(tt_code)
+            log(f'Relaxed S_MAGIC_COMPAT check in {tt_path} for Android 16')
 
 # 6. Ensure KSU_KPROBES_HOOK stays default n (Manual hook mode)
 kconfig_path = 'drivers/kernelsu/Kconfig'
