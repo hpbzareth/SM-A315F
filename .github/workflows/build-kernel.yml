@@ -53,36 +53,31 @@ jobs:
     steps:
       - id: set-matrix
         run: |
+          TARGET_DEV="${{ inputs.target_device }}"
+          SE_MODE="${{ inputs.selinux_mode }}"
           python3 -c "
           import json, os
-          target_device = '${{ inputs.target_device }}'
-          devices = ['a31', 'a41'] if target_device == 'all' else [target_device]
-          selinux_input = '${{ inputs.selinux_mode }}'
-          modes = ['permissive', 'enforcing'] if selinux_input == 'both' else [selinux_input]
-
-          include = []
-          for d in devices:
-              for m in modes:
-                  include.append({'device': d, 'selinux_mode': m})
-
-          matrix = {'include': include}
+          devs = ['a31', 'a41'] if '$TARGET_DEV' == 'all' else ['$TARGET_DEV']
+          modes = ['permissive', 'enforcing'] if '$SE_MODE' == 'both' else ['$SE_MODE']
+          matrix = {'include': [{'device': d, 'selinux_mode': m} for d in devs for m in modes]}
           print('Generated Matrix:', json.dumps(matrix))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write('matrix=' + json.dumps(matrix) + '\n')
           "
 
   build:
-    name: Build Samsung ${{ matrix.device }} (${{ inputs.su_variant }})
+    name: Build Samsung ${{ matrix.device }} (${{ matrix.selinux_mode }})
     needs: matrix_prep
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix:
-        device: ${{ fromJson(needs.matrix_prep.outputs.devices) }}
+      matrix: ${{ fromJson(needs.matrix_prep.outputs.matrix) }}
 
     env:
-      KSU_VERSION_OVERRIDE: 33355
-      KSU_VERSION_TAG_OVERRIDE: v3.4.2
+      KSU_OVERRIDE_VERSION: 12851
+      KSU_OVERRIDE_VERSION_TAG: v1.1.1
+      KSU_VERSION_OVERRIDE: 12851
+      KSU_VERSION_TAG_OVERRIDE: v1.1.1
     steps:
       - name: Free Runner Disk Space
         run: |
@@ -196,7 +191,6 @@ jobs:
           done
           scripts/config --file out/.config -e LTO_NONE || true
           scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE || true
-          scripts/config --file out/.config -e SECURITY_SELINUX_DEVELOP || true
 
           # Relax strict module RWX for runtime hooking compatibility
           scripts/config --file out/.config -d STRICT_MODULE_RWX || true
@@ -224,10 +218,19 @@ jobs:
           scripts/config --file out/.config -e FSCRYPT_SDP || true
           scripts/config --file out/.config -e FS_ENCRYPTION_INLINE_CRYPT || true
 
-          # SELinux Permissive (Essential for GSI & OneUI 8 Port Stability)
-          scripts/config --file out/.config -e ALWAYS_PERMISSIVE || true
-          scripts/config --file out/.config -d SECURITY_SELINUX_ALWAYS_ENFORCE || true
-          scripts/config --file out/.config -e SECURITY_SELINUX_DEVELOP || true
+          # SELinux Configuration (Permissive vs Enforcing)
+          SELINUX_MODE="${{ matrix.selinux_mode }}"
+          if [ "$SELINUX_MODE" = "permissive" ]; then
+            echo "--- Configuring Permissive SELinux ---"
+            scripts/config --file out/.config -e ALWAYS_PERMISSIVE || true
+            scripts/config --file out/.config -d SECURITY_SELINUX_ALWAYS_ENFORCE || true
+            scripts/config --file out/.config -e SECURITY_SELINUX_DEVELOP || true
+          else
+            echo "--- Configuring Enforcing SELinux ---"
+            scripts/config --file out/.config -d ALWAYS_PERMISSIVE || true
+            scripts/config --file out/.config -d SECURITY_SELINUX_ALWAYS_ENFORCE || true
+            scripts/config --file out/.config -e SECURITY_SELINUX_DEVELOP || true
+          fi
 
           # === Mitrinket Safe Performance & Hardware Optimizations ===
           echo "--- Applying Mitrinket Hardware Optimizations (RAM, CPU, Touch, Battery, Deep Sleep) ---"
@@ -237,6 +240,7 @@ jobs:
           scripts/config --file out/.config -e ZRAM_WRITEBACK || true
           scripts/config --file out/.config -e ZSMALLOC || true
           scripts/config --file out/.config -d ZSMALLOC_STAT || true
+          scripts/config --file out/.config -e CRYPTO_LZO || true
           scripts/config --file out/.config -e CRYPTO_LZ4 || true
           scripts/config --file out/.config -e CRYPTO_ZSTD || true
           scripts/config --file out/.config -e PROCESS_RECLAIM || true
@@ -387,15 +391,14 @@ jobs:
           sed -i 's|for mount in /cache /data /metadata /persist; do|for mount in /cache; do|' META-INF/com/google/android/update-binary
           sed -i 's|/metadata||g' META-INF/com/google/android/update-binary
 
-          # Bundle official ksud v1.0.5 binary and auto-update /data/adb/ksud on flash
+          # Bundle official ksud v1.1.1 binary and auto-update /data/adb/ksud on flash
           if [ -f /tmp/ksud ]; then
             cp -vf /tmp/ksud ./ksud
             echo "" >> anykernel.sh
-            echo "echo lzo-rle > /sys/block/zram0/comp_algorithm 2>/dev/null || true" >> anykernel.sh
-            echo "# Auto-update /data/adb/ksud with official v1.0.5 and clean up stale RSKU state" >> anykernel.sh
+            echo "# Auto-update /data/adb/ksud with official v1.1.1 and tune ZRAM to lzo-rle" >> anykernel.sh
             echo "mount /data 2>/dev/null" >> anykernel.sh
             echo "if [ -d /data/adb ]; then" >> anykernel.sh
-            echo "  ui_print \"- Updating /data/adb/ksud to official v1.0.5...\"" >> anykernel.sh
+            echo "  ui_print \"- Updating /data/adb/ksud to official v1.1.1...\"" >> anykernel.sh
             echo "  cp -f \$home/ksud /data/adb/ksud 2>/dev/null" >> anykernel.sh
             echo "  chmod 755 /data/adb/ksud 2>/dev/null" >> anykernel.sh
             echo "  chown 0:0 /data/adb/ksud 2>/dev/null" >> anykernel.sh
@@ -408,6 +411,11 @@ jobs:
             echo "    ui_print \"- Disabling zygisk_vector to prevent system_server crash loop...\"" >> anykernel.sh
             echo "    touch /data/adb/modules/zygisk_vector/disable 2>/dev/null" >> anykernel.sh
             echo "  fi" >> anykernel.sh
+            echo "  # Configure boot service for ZRAM lzo-rle compression" >> anykernel.sh
+            echo "  mkdir -p /data/adb/service.d 2>/dev/null" >> anykernel.sh
+            echo "  echo '#!/system/bin/sh' > /data/adb/service.d/99-zram.sh 2>/dev/null" >> anykernel.sh
+            echo "  echo 'echo lzo-rle > /sys/block/zram0/comp_algorithm 2>/dev/null' >> /data/adb/service.d/99-zram.sh 2>/dev/null" >> anykernel.sh
+            echo "  chmod 755 /data/adb/service.d/99-zram.sh 2>/dev/null" >> anykernel.sh
             echo "fi" >> anykernel.sh
           fi
 
@@ -426,9 +434,6 @@ jobs:
           curl -LSs https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v1.1.1/KernelSU_Next_v1.1.1-spoofed_12851-release.apk -o "$GITHUB_WORKSPACE/staging/KernelSU_Next_v1.1.1-spoofed_12851-release.apk" || true
           curl -LSs https://github.com/bmax121/APatch/releases/download/11282/APatch_11282_e8e4651_HEAD-release-signed.apk -o "$GITHUB_WORKSPACE/staging/APatch_11282_release.apk" || true
 
-          # Generate sha256 checksums
-          sha256sum *.zip *.apk > sha256sums.txt
-
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           ls -lh $GITHUB_WORKSPACE/staging/
 
@@ -440,7 +445,6 @@ jobs:
           path: |
             staging/*.zip
             staging/*.apk
-            staging/sha256sums.txt
             out/arch/arm64/boot/Image*
             out/.config
             build.log
@@ -463,36 +467,42 @@ jobs:
       - name: Prepare Release Assets & Notes
         run: |
           mkdir -p release_assets
-          find all_artifacts -type f \( -name "*.zip" -o -name "*.apk" -o -name "*.txt" \) -exec cp -v {} release_assets/ \;
+          find all_artifacts -type f \( -name "*.zip" -o -name "*.apk" \) -exec cp -v {} release_assets/ \;
           cd release_assets
+          sha256sum *.zip *.apk > sha256sums.txt
+          cat sha256sums.txt
           ls -lh
-          cat << 'END_NOTES' > release_notes.md
-          ## 🧪 [BETA] Samsung Galaxy A31 (SM-A315F) & A41 (SM-A415F) - KernelSU-Next v3.4.2 Build
 
-          > [!WARNING]
-          > **BETA RELEASE (Experimental):** This is a dedicated test build evaluating the upgraded **KernelSU-Next v3.4.2** (Protocol: `33355`) and official `ksud` v3.4.2 64-bit ELF binary. The latest stable release remains **v1.0.0-Rev3**.
+          cat << 'END_NOTES' > release_notes.md
+          ## ⚡ Samsung Galaxy A31 (SM-A315F) & A41 (SM-A415F) - Revision 4 (Rev4) Stable
 
           ### 📱 Kernel & Device Details
-          - **Device Support:** Samsung Galaxy A31 (`SM-A315F`) & Samsung Galaxy A41 (`SM-A415F`)
-          - **Kernel Name:** `4.14.186 Zareth Kernel Beta (KSUN v3.4.2)`
+          - **Kernel Name (uname):** `4.14.186 ZarethKernel`
+          - **Target Devices:** Samsung Galaxy A31 (`SM-A315F/G`) & Samsung Galaxy A41 (`SM-A415F`)
           - **Chipset:** MediaTek Helio P65 (`MT6768`)
-          - **Root Engine:** KernelSU-Next **v3.4.2** (Protocol `33355`) + embedded official `ksud` v3.4.2 ELF
+          - **Root Engine:** KernelSU-Next **v1.1.1 LTS** (Protocol `12851`) + embedded official `ksud` v1.1.1 ELF
           - **Stealth & Anti-Detection:** SuSFS v2.2.0 (kernel-level inline hooks, mount hiding, try_umount)
-          - **SELinux Mode:** Permissive
+          - **SELinux Modes:** Both **Permissive** and **Enforcing** packages provided
           - **Hook Mode:** Zero KProbes Manual Inline Hooks (100% stability, no kernel crash loops)
+          - **ZRAM Compression:** Tuned to `lzo-rle` for optimal throughput and low CPU overhead on MT6768
+          - **Performance & Battery:** Schedutil governor tuning, SchedTune, Google BBR TCP congestion control, Power-efficient workqueues, Deep sleep autosleep
 
-          ### 📦 Included Files
-          - `SM-A31-ZarethKernel-Beta-KSUN342-Permissive-SuSFS.zip` - Flashable zip for Galaxy A31
-          - `SM-A41-ZarethKernel-Beta-KSUN342-Permissive-SuSFS.zip` - Flashable zip for Galaxy A41
-          - `KernelSU_Next_v3.4.2_33355-release.apk` - Official Manager APK
-          - `KernelSU_Next_v3.4.2-spoofed_33355-release.apk` - Official Spoofed Manager APK
-          - `sha256sums.txt` - SHA256 integrity checksums
+          ### 📦 Included Packages
+          - `SM-A31-ZarethKernel-Rev4-Permissive-SuSFS.zip` - Galaxy A31 (SELinux Permissive)
+          - `SM-A31-ZarethKernel-Rev4-Enforcing-SuSFS.zip` - Galaxy A31 (SELinux Enforcing)
+          - `SM-A41-ZarethKernel-Rev4-Permissive-SuSFS.zip` - Galaxy A41 (SELinux Permissive)
+          - `SM-A41-ZarethKernel-Rev4-Enforcing-SuSFS.zip` - Galaxy A41 (SELinux Enforcing)
+          - `KernelSU_Next_v1.1.1_12851-release.apk` - Official KernelSU-Next Manager v1.1.1
+          - `KernelSU_Next_v1.1.1-spoofed_12851-release.apk` - Official Spoofed Manager v1.1.1
+          - `APatch_11282_release.apk` - APatch Manager
+          - `sha256sums.txt` - Complete SHA256 integrity checksums
 
-          ### 💡 Flashing & Usage Instructions
-          1. Flash the flashable zip via TWRP / OrangeFox recovery or Kernel Flasher.
-          2. The installer will automatically update `/data/adb/ksud` to v3.4.2 and reset lockfiles.
+          ### 💡 Installation Instructions
+          1. Flash your device-specific zip (`Permissive` or `Enforcing`) via TWRP / OrangeFox or Kernel Flasher.
+          2. Enjoy the Mitrinket ASCII cat welcome banner in recovery!
           3. Reboot to system.
-          4. Install or upgrade to `KernelSU_Next_v3.4.2_33355-release.apk`.
+          4. Install `KernelSU_Next_v1.1.1_12851-release.apk` (or the spoofed APK).
+          5. Verify KernelSU-Next status: **Working** (Protocol `12851`) & SuSFS: **v2.2.0**!
           END_NOTES
           sed -i 's/^          //' release_notes.md
 
@@ -502,7 +512,7 @@ jobs:
         with:
           tag_name: ${{ inputs.release_tag }}
           name: 'Samsung Galaxy A31 / A41 Revision 4 (ZarethKernel)'
-          prerelease: ${{ contains(inputs.release_tag, 'Beta') }}
+          prerelease: false
           body_path: release_assets/release_notes.md
           files: |
             release_assets/*.zip
