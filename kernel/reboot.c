@@ -294,6 +294,24 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	if (ksu_handle_sys_reboot(magic1, magic2, cmd, &arg))
 		return 0;
 #endif
+#ifdef CONFIG_KSU_SUSFS
+	if (magic1 == 0xDEADBEEF && magic2 == 0xFAFAFAFA) {
+		extern void susfs_show_version(void __user **user_info);
+		extern void susfs_get_enabled_features(void __user **user_info);
+		extern void susfs_show_variant(void __user **user_info);
+		switch (cmd) {
+		case 0x555e1: // CMD_SUSFS_SHOW_VERSION
+			susfs_show_version(&arg);
+			return 0;
+		case 0x555e2: // CMD_SUSFS_SHOW_ENABLED_FEATURES
+			susfs_get_enabled_features(&arg);
+			return 0;
+		case 0x555e3: // CMD_SUSFS_SHOW_VARIANT
+			susfs_show_variant(&arg);
+			return 0;
+		}
+	}
+#endif
 
 	/* We only trust the superuser with rebooting the system. */
 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
