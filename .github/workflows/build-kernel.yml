@@ -21,6 +21,15 @@ name: Build Samsung Galaxy A31 / A41 (ZarethKernel Rev4 - KSUN v1.1.1 & SuSFS)
           - 'ksun_susfs'
           - 'ksun_nosusfs'
           - 'vanilla'
+      selinux_mode:
+        description: 'SELinux Mode'
+        required: true
+        type: choice
+        default: 'both'
+        options:
+          - 'both'
+          - 'permissive'
+          - 'enforcing'
       make_release:
         description: 'Create/Update GitHub Release on Success'
         required: false
@@ -40,15 +49,27 @@ jobs:
     name: Setup Matrix
     runs-on: ubuntu-latest
     outputs:
-      devices: ${{ steps.set-matrix.outputs.devices }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
         run: |
-          if [ "${{ inputs.target_device }}" = "all" ]; then
-            echo 'devices=["a31", "a41"]' >> $GITHUB_OUTPUT
-          else
-            echo 'devices=["${{ inputs.target_device }}"]' >> $GITHUB_OUTPUT
-          fi
+          python3 -c "
+          import json, os
+          target_device = '${{ inputs.target_device }}'
+          devices = ['a31', 'a41'] if target_device == 'all' else [target_device]
+          selinux_input = '${{ inputs.selinux_mode }}'
+          modes = ['permissive', 'enforcing'] if selinux_input == 'both' else [selinux_input]
+
+          include = []
+          for d in devices:
+              for m in modes:
+                  include.append({'device': d, 'selinux_mode': m})
+
+          matrix = {'include': include}
+          print('Generated Matrix:', json.dumps(matrix))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('matrix=' + json.dumps(matrix) + '\n')
+          "
 
   build:
     name: Build Samsung ${{ matrix.device }} (${{ inputs.su_variant }})
@@ -353,10 +374,13 @@ jobs:
           SM-A315F/G Kernel by Zareth
           BANNER_EOF
 
+          SELINUX_MODE="${{ matrix.selinux_mode }}"
+          SELINUX_CAP=$(echo "$SELINUX_MODE" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+
           # Fix AnyKernel3 device check and dynamic block detection
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
           sed -i 's|BLOCK=/dev/block/by-name/boot;|BLOCK=boot;|' anykernel.sh
-          sed -i "s/kernel.string=.*/kernel.string=SM-${UPPER_DEV} ZarethKernel (Permissive) - KSUN v1.1.1 & SuSFS v2.2.0/" anykernel.sh
+          sed -i "s/kernel.string=.*/kernel.string=SM-${UPPER_DEV} ZarethKernel (${SELINUX_CAP}) - KSUN v1.1.1 & SuSFS v2.2.0/" anykernel.sh
 
           # Fix Samsung recovery metadata & partition locking (strip #FLASHAFTERUPDATEV2 and metadata references)
           echo "# Dummy file; update-binary is a shell script." > META-INF/com/google/android/updater-script
@@ -390,7 +414,7 @@ jobs:
           cp -v $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz-dtb .
           cp -v $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz .
 
-          ZIP_NAME="SM-${UPPER_DEV}-ZarethKernel-Rev4-Permissive-SuSFS.zip"
+          ZIP_NAME="SM-${UPPER_DEV}-ZarethKernel-Rev4-${SELINUX_CAP}-SuSFS.zip"
 
           zip -r9 "$GITHUB_WORKSPACE/staging/$ZIP_NAME" * -x *placeholder
           echo "Created flashable zip: $ZIP_NAME"
@@ -412,7 +436,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Samsung-${{ matrix.device }}-Kernel-${{ github.run_number }}
+          name: Samsung-${{ matrix.device }}-${{ matrix.selinux_mode }}-Kernel-${{ github.run_number }}
           path: |
             staging/*.zip
             staging/*.apk
