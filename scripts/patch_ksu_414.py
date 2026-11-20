@@ -174,11 +174,27 @@ void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
         f.write(hook_code)
     log('core_hook.c successfully patched')
 
-# 3. Patch fs/notify/fdinfo.c to resolve label syntax issue
+# 3. Patch fs/notify/fdinfo.c to resolve inotify_mark_user_mask and label syntax issue
 fdinfo_path = 'fs/notify/fdinfo.c'
 if os.path.exists(fdinfo_path):
     with open(fdinfo_path, 'r', encoding='utf-8') as f:
         fdinfo_code = f.read()
+
+    if 'static inline u32 inotify_mark_user_mask' not in fdinfo_code:
+        inotify_helper = """
+#ifndef inotify_mark_user_mask
+static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)
+{
+	return mark->mask & IN_ALL_EVENTS;
+}
+#endif
+"""
+        target_inc = '#include "inotify/inotify.h"'
+        if target_inc in fdinfo_code:
+            fdinfo_code = fdinfo_code.replace(target_inc, target_inc + "\n" + inotify_helper, 1)
+        else:
+            fdinfo_code = inotify_helper + "\n" + fdinfo_code
+        log('Added inotify_mark_user_mask definition to fs/notify/fdinfo.c')
 
     target_label = """#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT)
 bypass_orig_flow:
@@ -195,9 +211,10 @@ bypass_orig_flow:
 
     if target_label in fdinfo_code:
         fdinfo_code = fdinfo_code.replace(target_label, fixed_label)
-        with open(fdinfo_path, 'w', encoding='utf-8') as f:
-            f.write(fdinfo_code)
         log('fs/notify/fdinfo.c label syntax fixed')
+
+    with open(fdinfo_path, 'w', encoding='utf-8') as f:
+        f.write(fdinfo_code)
 
 # 4. Patch drivers/kernelsu/core_hook.c for on-demand throne tracking
 if os.path.exists('drivers/kernelsu/core_hook.c'):
